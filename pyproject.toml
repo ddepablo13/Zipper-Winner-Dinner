@@ -1,0 +1,12 @@
+[project]
+name = "zip-solver"
+version = "1.0.0"
+description = "LinkedIn Zip Puzzle solver"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+browser = ["playwright"]
+
+[project.scripts]
+zip-solver = "src.cli:main"
