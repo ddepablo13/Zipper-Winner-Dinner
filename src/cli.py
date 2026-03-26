@@ -8,11 +8,18 @@ from src.output.json_export import export_json
 
 
 def main():
-    parser = argparse.ArgumentParser(description="LinkedIn Zip Puzzle Solver")
+    parser = argparse.ArgumentParser(
+        description="LinkedIn Zip Puzzle Solver",
+        epilog="Examples:\n"
+               "  zip-solver --file puzzle.json\n"
+               "  zip-solver --browser --auto-play\n"
+               "  zip-solver --manual --save solution.json\n",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
 
     # Input mode (mutually exclusive)
     input_group = parser.add_mutually_exclusive_group()
-    input_group.add_argument("--browser", action="store_true", default=True,
+    input_group.add_argument("--browser", action="store_true",
                              help="Read puzzle from LinkedIn via Playwright (default)")
     input_group.add_argument("--manual", action="store_true",
                              help="Enter puzzle manually via CLI")
@@ -35,37 +42,55 @@ def main():
 
     args = parser.parse_args()
 
+    # Determine input mode (browser is default when neither --manual nor --file)
+    use_browser = not args.manual and not args.file
+
     # Read puzzle
+    reader = None
     page = None
-    if args.file:
-        from src.readers.json_reader import read_json
-        puzzle = read_json(args.file)
-    elif args.manual:
-        from src.readers.manual_reader import read_manual
-        puzzle = read_manual()
-    else:
-        from src.readers.playwright_reader import PlaywrightReader
-        reader = PlaywrightReader(headless=args.headless, profile=args.profile)
-        puzzle = reader.read()
-        page = reader.page
+    try:
+        if args.file:
+            from src.readers.json_reader import read_json
+            puzzle = read_json(args.file)
+        elif args.manual:
+            from src.readers.manual_reader import read_manual
+            puzzle = read_manual()
+        else:
+            from src.readers.playwright_reader import PlaywrightReader
+            reader = PlaywrightReader(headless=args.headless, profile=args.profile)
+            puzzle = reader.read()
+            page = reader.page
 
-    # Solve
-    result = solve(puzzle)
+        # Solve
+        result = solve(puzzle)
 
-    # Output
-    if not args.no_display:
-        display_solution(puzzle, result)
+        # Output
+        if not args.no_display:
+            display_solution(puzzle, result)
 
-    if not result.solved:
-        print("No solution found!")
-        sys.exit(1)
-
-    if args.save:
-        export_json(puzzle, result, args.save)
-
-    if args.auto_play:
-        if page is None:
-            print("Error: --auto-play requires --browser mode")
+        if not result.solved:
+            print("No solution found!")
             sys.exit(1)
-        from src.output.playwright_player import play_solution
-        play_solution(page, puzzle, result.path)
+
+        if args.save:
+            export_json(puzzle, result, args.save)
+
+        if args.auto_play:
+            if page is None:
+                print("Error: --auto-play requires browser mode (don't use --file or --manual)")
+                sys.exit(1)
+            from src.output.playwright_player import play_solution
+            play_solution(page, puzzle, result.path)
+
+    except KeyboardInterrupt:
+        print("\nInterrupted.")
+        sys.exit(130)
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        sys.exit(1)
+    finally:
+        if reader is not None and not args.auto_play:
+            reader.close()

@@ -17,6 +17,8 @@ class SolveResult:
 
 def solve(puzzle: Puzzle) -> SolveResult:
     grid = puzzle.grid
+    rows = grid.rows
+    cols = grid.cols
     total = puzzle.total_cells
     waypoints = puzzle.waypoints
 
@@ -24,108 +26,142 @@ def solve(puzzle: Puzzle) -> SolveResult:
     wp_sorted = sorted(waypoints.items())
     # Map from (row, col) -> waypoint number for quick lookup
     wp_at: dict[tuple[int, int], int] = {pos: num for num, pos in wp_sorted}
-    # Next waypoint index lookup: after reaching waypoint N, next is wp_sorted[index]
-    wp_index_of: dict[int, int] = {num: i for i, (num, _) in enumerate(wp_sorted)}
 
-    # Precompute adjacency
-    neighbors: dict[tuple[int, int], list[tuple[int, int]]] = {}
-    for r in range(grid.rows):
-        for c in range(grid.cols):
-            neighbors[(r, c)] = grid.get_neighbors(r, c)
+    # Precompute adjacency as flat index lists for speed
+    neighbors: list[list[int]] = [[] for _ in range(total)]
+    for r in range(rows):
+        for c in range(cols):
+            idx = r * cols + c
+            for nr, nc in grid.get_neighbors(r, c):
+                neighbors[idx].append(nr * cols + nc)
 
-    start = wp_sorted[0][1]  # position of waypoint 1
-    path: list[tuple[int, int]] = [start]
-    visited = [[False] * grid.cols for _ in range(grid.rows)]
-    visited[start[0]][start[1]] = True
+    # Flat index helpers
+    def to_idx(r: int, c: int) -> int:
+        return r * cols + c
+
+    def from_idx(idx: int) -> tuple[int, int]:
+        return divmod(idx, cols)
+
+    # Convert waypoint data to flat indices
+    wp_sorted_idx = [(num, to_idx(r, c)) for num, (r, c) in wp_sorted]
+    wp_at_idx: dict[int, int] = {to_idx(r, c): num for (r, c), num in wp_at.items()}
+    wp_positions_idx = [idx for _, idx in wp_sorted_idx]
+
+    start_idx = wp_sorted_idx[0][1]
+    path: list[int] = [start_idx]
+    visited = [False] * total
+    visited[start_idx] = True
     states_explored = 0
+    unvisited_count = total - 1
     t0 = time.perf_counter()
 
-    def is_connected(exclude_r: int, exclude_c: int) -> bool:
-        """Check if all unvisited cells (after marking exclude) remain connected."""
-        # Find first unvisited cell that isn't the excluded one
-        seed = None
-        unvisited_count = 0
-        for r in range(grid.rows):
-            for c in range(grid.cols):
-                if not visited[r][c] and not (r == exclude_r and c == exclude_c):
-                    unvisited_count += 1
-                    if seed is None:
-                        seed = (r, c)
-        if unvisited_count == 0:
-            return True
-        # BFS from seed
-        queue = deque([seed])
-        reached = 1
-        seen = [[False] * grid.cols for _ in range(grid.rows)]
-        seen[seed[0]][seed[1]] = True
-        while queue:
-            cr, cc = queue.popleft()
-            for nr, nc in neighbors[(cr, cc)]:
-                if not seen[nr][nc] and not visited[nr][nc] and not (nr == exclude_r and nc == exclude_c):
-                    seen[nr][nc] = True
-                    reached += 1
-                    queue.append((nr, nc))
-        return reached == unvisited_count
+    # Reusable BFS queue and seen array for connectivity check
+    _bfs_queue = deque()
+    _bfs_seen = [False] * total
 
-    def dfs(pos: tuple[int, int], next_wp_idx: int) -> bool:
-        nonlocal states_explored
+    def is_connected(exclude: int) -> bool:
+        """Check if all unvisited cells (after marking exclude) remain connected."""
+        seed = -1
+        target_count = unvisited_count - 1  # exclude one more cell
+        if target_count <= 0:
+            return True
+
+        # Find seed: first unvisited cell that isn't excluded
+        for i in range(total):
+            if not visited[i] and i != exclude:
+                seed = i
+                break
+
+        # BFS from seed
+        queue = _bfs_queue
+        seen = _bfs_seen
+        queue.clear()
+        queue.append(seed)
+        seen[seed] = True
+        reached = 1
+
+        while queue:
+            cur = queue.popleft()
+            for nb in neighbors[cur]:
+                if not seen[nb] and not visited[nb] and nb != exclude:
+                    seen[nb] = True
+                    reached += 1
+                    if reached == target_count:
+                        # Early exit: all reachable
+                        # Clean up seen
+                        for i in range(total):
+                            seen[i] = False
+                        return True
+                    queue.append(nb)
+
+        # Clean up seen
+        for i in range(total):
+            seen[i] = False
+        return reached == target_count
+
+    def dfs(pos: int, next_wp_idx: int) -> bool:
+        nonlocal states_explored, unvisited_count
         states_explored += 1
 
-        if len(path) == total:
+        if unvisited_count == 0:
             return True
 
-        remaining = total - len(path)
+        remaining = unvisited_count
+
         # Manhattan feasibility: check we can reach remaining waypoints in order
-        if next_wp_idx < len(wp_sorted):
+        if next_wp_idx < len(wp_sorted_idx):
             dist_sum = 0
-            prev = pos
-            for i in range(next_wp_idx, len(wp_sorted)):
-                wp_pos = wp_sorted[i][1]
-                dist_sum += abs(prev[0] - wp_pos[0]) + abs(prev[1] - wp_pos[1])
-                prev = wp_pos
+            pr, pc = from_idx(pos)
+            for i in range(next_wp_idx, len(wp_sorted_idx)):
+                wr, wc = from_idx(wp_sorted_idx[i][1])
+                dist_sum += abs(pr - wr) + abs(pc - wc)
+                pr, pc = wr, wc
             if dist_sum > remaining:
                 return False
 
-        # Sort neighbors: prefer those closer to next waypoint
+        # Sort neighbors: prefer those closer to next waypoint target
         nbrs = neighbors[pos]
-        if next_wp_idx < len(wp_sorted):
-            target = wp_sorted[next_wp_idx][1]
-            nbrs = sorted(nbrs, key=lambda n: abs(n[0] - target[0]) + abs(n[1] - target[1]))
+        if next_wp_idx < len(wp_sorted_idx):
+            target = wp_sorted_idx[next_wp_idx][1]
+            tr, tc = from_idx(target)
+            nbrs = sorted(nbrs, key=lambda n: abs(n // cols - tr) + abs(n % cols - tc))
 
-        for nr, nc in nbrs:
-            if visited[nr][nc]:
+        for nb in nbrs:
+            if visited[nb]:
                 continue
 
             # Waypoint ordering: if this cell has a waypoint, it must be the next one
-            cell_wp = wp_at.get((nr, nc))
+            cell_wp = wp_at_idx.get(nb)
             if cell_wp is not None:
-                if next_wp_idx >= len(wp_sorted) or wp_sorted[next_wp_idx][0] != cell_wp:
+                if next_wp_idx >= len(wp_sorted_idx) or wp_sorted_idx[next_wp_idx][0] != cell_wp:
                     continue
 
-            # Connectivity check
-            if remaining > 2 and not is_connected(nr, nc):
+            # Connectivity check (skip when only 1-2 cells remain)
+            if remaining > 2 and not is_connected(nb):
                 continue
 
             # Make move
-            visited[nr][nc] = True
-            path.append((nr, nc))
+            visited[nb] = True
+            unvisited_count -= 1
+            path.append(nb)
             new_wp_idx = next_wp_idx + 1 if cell_wp is not None else next_wp_idx
 
-            if dfs((nr, nc), new_wp_idx):
+            if dfs(nb, new_wp_idx):
                 return True
 
             # Undo move
             path.pop()
-            visited[nr][nc] = False
+            visited[nb] = False
+            unvisited_count += 1
 
         return False
 
     # Start DFS from waypoint 1, next waypoint to find is index 1 (waypoint 2)
-    found = dfs(start, 1)
+    found = dfs(start_idx, 1)
     elapsed = (time.perf_counter() - t0) * 1000
 
     return SolveResult(
-        path=list(path) if found else None,
+        path=[from_idx(i) for i in path] if found else None,
         elapsed_ms=elapsed,
         states_explored=states_explored,
     )
